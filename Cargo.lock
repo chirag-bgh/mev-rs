@@ -4561,6 +4561,7 @@ dependencies = [
  "reth-basic-payload-builder",
  "reth-db",
  "reth-node-ethereum",
+ "reth-transaction-pool",
  "serde",
  "sha2 0.10.8",
  "thiserror",

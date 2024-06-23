@@ -1,4 +1,7 @@
-use crate::payload::{attributes::BuilderPayloadBuilderAttributes, job::PayloadFinalizerConfig};
+use crate::{
+    greedy::Helper,
+    payload::{attributes::BuilderPayloadBuilderAttributes, job::PayloadFinalizerConfig},
+};
 use alloy_signer::SignerSync;
 use alloy_signer_wallet::LocalWallet;
 use reth::{
@@ -29,6 +32,7 @@ use reth_basic_payload_builder::{
     commit_withdrawals, is_better_payload, pre_block_beacon_root_contract_call, BuildArguments,
     BuildOutcome, PayloadConfig, WithdrawalsOutcome,
 };
+use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
 use std::{
     collections::HashMap,
     ops::Deref,
@@ -460,13 +464,34 @@ where
     )?;
 
     let mut receipts = Vec::new();
-    while let Some(pool_tx) = best_txs.next() {
+    // transactions to be included in the block
+    let mut transactions = Vec::<TransactionSignedEcRecovered>::new();
+    // store best_txs in a vector without moving best_txs
+    let mut orders = best_txs.into_iter().collect::<Vec<_>>();
+
+    let mut min_price = orders[0].cut_off_price(90);
+    while orders.len() > 0 {
+        let order = orders[0].clone();
+        if order.is_order_in_price_range(min_price) {
+            // remove order from the iterator
+            orders.remove(0);
+            transactions.push(order.to_recovered_transaction());
+        } else {
+            if !transactions.is_empty() {
+                transactions.sort_by_key(|tx| tx.profit(base_fee, tx.gas_limit()));
+                // transact
+            }
+            min_price = order.cut_off_price(90);
+        }
+    }
+
+    while let Some(pool_tx) = transactions.clone().into_iter().next() {
         // ensure we still have capacity for this transaction
         if cumulative_gas_used + pool_tx.gas_limit() > block_gas_limit {
             // we can't fit this transaction into the block, so we need to mark it as invalid
             // which also removes all dependent transaction from the iterator before we can
             // continue
-            best_txs.mark_invalid(&pool_tx);
+            // best_txs.mark_invalid(&pool_tx);
             continue
         }
 
@@ -476,7 +501,7 @@ where
         }
 
         // convert tx to a signed transaction
-        let tx = pool_tx.to_recovered_transaction();
+        let tx = pool_tx;
 
         // There's only limited amount of blob space available per block, so we need to check if
         // the EIP-4844 can still fit in the block
@@ -488,7 +513,7 @@ where
                 // the iterator. This is similar to the gas limit condition
                 // for regular transactions above.
                 trace!(target: "payload_builder", tx=?tx.hash, ?sum_blob_gas_used, ?tx_blob_gas, "skipping blob transaction because it would exceed the max data gas per block");
-                best_txs.mark_invalid(&pool_tx);
+                // best_txs.mark_invalid(&pool_tx);
                 continue
             }
         }
@@ -515,7 +540,7 @@ where
                             // if the transaction is invalid, we can skip it and all of its
                             // descendants
                             trace!(target: "payload_builder", %err, ?tx, "skipping invalid transaction and its descendants");
-                            best_txs.mark_invalid(&pool_tx);
+                            // best_txs.mark_invalid(&pool_tx);
                         }
 
                         continue
@@ -539,7 +564,7 @@ where
 
             // if we've reached the max data gas per block, we can skip blob txs entirely
             if sum_blob_gas_used == MAX_DATA_GAS_PER_BLOCK {
-                best_txs.skip_blobs();
+                // best_txs.skip_blobs();
             }
         }
 
